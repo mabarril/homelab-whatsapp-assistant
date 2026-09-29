@@ -1,0 +1,96 @@
+networks:
+  homelab_net:
+    driver: bridge
+
+volumes:
+  pg_data:
+  redis_data:
+  evolution_instances:
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: assistant_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - homelab_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    container_name: assistant_redis
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    networks:
+      - homelab_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  evolution-api:
+    image: evoapicloud/evolution-api:v2.3.6    
+    container_name: assistant_evolution
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - SERVER_PORT=8080
+      - SERVER_URL=http://localhost:8080
+      - AUTHENTICATION_TYPE=apikey
+      - AUTHENTICATION_API_KEY=${EVOLUTION_API_KEY}
+      - DATABASE_ENABLED=true
+      - DATABASE_PROVIDER=postgresql
+      - DATABASE_CONNECTION_URI=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=evolution
+      - REDIS_ENABLED=true
+      - REDIS_URI=redis://redis:6379
+    volumes:
+      - evolution_instances:/evolution/instances
+    ports:
+      - "8080:8080"
+    networks:
+      - homelab_net
+
+  core-assistant:
+    build: .
+    container_name: assistant_core
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      evolution-api:
+        condition: service_started
+    environment:
+      - PORT=3000
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=public
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - EVOLUTION_BASE_URL=http://evolution-api:8080
+      - EVOLUTION_API_KEY=${EVOLUTION_API_KEY}
+      - EVOLUTION_INSTANCE_NAME=homelab_family
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - ADMIN_PHONE_NUMBER=5561981306655
+    ports:
+      - "3000:3000"
+    networks:
+      - homelab_net
