@@ -12,6 +12,7 @@ import { GeminiLLMClient } from './adapters/outbound/llm/GeminiLLMClient.js';
 import { ProcessIncomingMessage } from './core/application/use-cases/ProcessIncomingMessage.js';
 import { createMessageQueueWorker } from './adapters/inbound/queue/MessageQueueConsumer.js';
 import { isWebhookAuthorized } from './adapters/inbound/http/webhookAuth.js';
+import { enqueueIncomingEvent } from './adapters/inbound/http/webhookEnqueue.js';
 import { maskPhone, normalizePhoneNumber } from './core/domain/entities/User.js';
 
 // Schema de validação das variáveis de ambiente
@@ -187,30 +188,30 @@ const server = http.createServer(async (req, res) => {
 
     req.on('end', async () => {
       if (aborted) return;
+
+      let payload: any;
       try {
-        const payload = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
-        const eventType = String(payload.event ?? 'unknown');
-        console.log(`[Webhook] Evento recebido da Evolution API: ${eventType}`);
-
-        // Apenas enfileira eventos de mensagem nova
-        if (['messages.upsert', 'messages-upsert', 'MESSAGES_UPSERT'].includes(eventType)) {
-          // jobId derivado do id da mensagem: a Evolution pode reentregar o
-          // mesmo evento e o BullMQ descarta jobs com id repetido.
-          const messageId = payload?.data?.key?.id;
-          await messageQueue.add('evolution-message', payload, {
-            jobId: typeof messageId === 'string' && messageId ? `msg-${messageId}` : undefined,
-            removeOnComplete: { age: 3600 },
-            removeOnFail: 100,
-          });
-        }
-
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ received: true, event: eventType }));
+        payload = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
       } catch (err: unknown) {
         const errorMsg = err instanceof Error ? err.message : 'Unknown error';
-        console.error('[Webhook] Erro ao ler payload:', errorMsg);
+        console.error('[Webhook] Payload inválido (JSON malformado):', errorMsg);
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Invalid JSON payload' }));
+        return;
+      }
+
+      const eventType = String(payload?.event ?? 'unknown');
+      console.log(`[Webhook] Evento recebido da Evolution API: ${eventType}`);
+
+      try {
+        const outcome = await enqueueIncomingEvent(messageQueue, payload);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ received: true, event: eventType, result: outcome.status }));
+      } catch (err: unknown) {
+        // Falha ao enfileirar (ex.: Redis indisponível): não é erro do cliente.
+        console.error('[Webhook] ❌ Falha ao enfileirar o evento:', err instanceof Error ? err.message : err);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Failed to enqueue event' }));
       }
     });
     return;
