@@ -57,11 +57,13 @@ POSTGRES_PASSWORD=sua_senha_segura
 POSTGRES_DB=homelab_assistant
 EVOLUTION_API_KEY=sua_evolution_api_key_secreta
 GEMINI_API_KEY=sua_chave_do_google_gemini
+GEMINI_MODEL=gemini-3.8-flash
 ADMIN_PHONE_NUMBER=5561999999999
 ALLOWED_PHONE_NUMBERS=5561888888888,5561777777777
 WEBHOOK_TOKEN=cole_aqui_a_saida_de_openssl_rand_hex_32
 ```
 
+- `GEMINI_MODEL` é opcional. Modelos antigos são desativados pela Google (o `gemini-2.5-flash` já não atende contas novas), então troque por aqui, sem mexer no código.
 - `ADMIN_PHONE_NUMBER` e `WEBHOOK_TOKEN` são **obrigatórios** (o app não sobe sem eles).
 - Apenas o admin e os números de `ALLOWED_PHONE_NUMBERS` são atendidos; qualquer outro remetente é ignorado.
 - As portas `3000` e `8080` são publicadas somente em `127.0.0.1`. Para acesso externo, use um reverse proxy com TLS.

@@ -24,6 +24,7 @@ const envSchema = z.object({
   EVOLUTION_API_KEY: z.string().optional().default(''),
   EVOLUTION_INSTANCE_NAME: z.string().default('homelab_family'),
   GEMINI_API_KEY: z.string().min(1, 'GEMINI_API_KEY é obrigatória para o assistente funcionar'),
+  GEMINI_MODEL: z.string().default('gemini-3.8-flash'),
   ADMIN_PHONE_NUMBER: z
     .string()
     .regex(/^\d{10,15}$/, 'ADMIN_PHONE_NUMBER deve conter apenas dígitos, com DDI e DDD (ex.: 5561999999999)'),
@@ -42,6 +43,7 @@ const env = envSchema.parse({
   EVOLUTION_API_KEY: process.env.EVOLUTION_API_KEY,
   EVOLUTION_INSTANCE_NAME: process.env.EVOLUTION_INSTANCE_NAME,
   GEMINI_API_KEY: process.env.GEMINI_API_KEY,
+  GEMINI_MODEL: process.env.GEMINI_MODEL || undefined,
   ADMIN_PHONE_NUMBER: process.env.ADMIN_PHONE_NUMBER,
   ALLOWED_PHONE_NUMBERS: process.env.ALLOWED_PHONE_NUMBERS,
   WEBHOOK_TOKEN: process.env.WEBHOOK_TOKEN,
@@ -90,7 +92,7 @@ const whatsAppClient = new EvolutionWhatsAppClient({
   instanceName: env.EVOLUTION_INSTANCE_NAME,
 });
 
-const llmClient = new GeminiLLMClient(env.GEMINI_API_KEY);
+const llmClient = new GeminiLLMClient(env.GEMINI_API_KEY, env.GEMINI_MODEL);
 
 // 5. Instanciação do Caso de Uso Principal
 const processIncomingMessage = new ProcessIncomingMessage(

@@ -137,7 +137,7 @@ export class GeminiLLMClient implements LLMServicePort {
   private readonly ai: GenAIClientLike;
   private readonly modelName: string;
 
-  constructor(apiKey: string, modelName: string = 'gemini-2.5-flash', ai?: GenAIClientLike) {
+  constructor(apiKey: string, modelName: string = 'gemini-3.8-flash', ai?: GenAIClientLike) {
     this.ai = ai ?? (new GoogleGenAI({ apiKey }) as unknown as GenAIClientLike);
     this.modelName = modelName;
   }
