@@ -50,19 +50,6 @@ CREATE TABLE IF NOT EXISTS print_calculations (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Insira seu número de telefone aqui (DDI + DDD + Número)
-INSERT INTO users (phone_number, name, role) VALUES 
-('556181306655', 'Barril', 'ADMIN')
-ON CONFLICT (phone_number) DO NOTHING;
-
-INSERT INTO conversations (user_id, is_active)
-SELECT id, true FROM users u
-WHERE NOT EXISTS (
-    SELECT 1 FROM conversations c WHERE c.user_id = u.id
-);
-
-INSERT INTO print_settings (user_id)
-SELECT id FROM users u
-WHERE NOT EXISTS (
-    SELECT 1 FROM print_settings ps WHERE ps.user_id = u.id
-);
+-- Nenhum usuário é criado aqui. O administrador (ADMIN_PHONE_NUMBER) e os
+-- números de ALLOWED_PHONE_NUMBERS são cadastrados automaticamente na primeira
+-- mensagem recebida.

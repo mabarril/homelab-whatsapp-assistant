@@ -65,7 +65,7 @@ services:
     volumes:
       - evolution_instances:/evolution/instances
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     networks:
       - homelab_net
 
@@ -89,8 +89,10 @@ services:
       - EVOLUTION_API_KEY=${EVOLUTION_API_KEY}
       - EVOLUTION_INSTANCE_NAME=homelab_family
       - GEMINI_API_KEY=${GEMINI_API_KEY}
-      - ADMIN_PHONE_NUMBER=5561981306655
+      - ADMIN_PHONE_NUMBER=${ADMIN_PHONE_NUMBER:?defina ADMIN_PHONE_NUMBER no .env}
+      - ALLOWED_PHONE_NUMBERS=${ALLOWED_PHONE_NUMBERS:-}
+      - WEBHOOK_TOKEN=${WEBHOOK_TOKEN:?defina WEBHOOK_TOKEN no .env}
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     networks:
       - homelab_net

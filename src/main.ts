@@ -11,6 +11,8 @@ import { EvolutionWhatsAppClient } from './adapters/outbound/whatsapp/EvolutionW
 import { GeminiLLMClient } from './adapters/outbound/llm/GeminiLLMClient.js';
 import { ProcessIncomingMessage } from './core/application/use-cases/ProcessIncomingMessage.js';
 import { createMessageQueueWorker } from './adapters/inbound/queue/MessageQueueConsumer.js';
+import { isWebhookAuthorized } from './adapters/inbound/http/webhookAuth.js';
+import { maskPhone, normalizePhoneNumber } from './core/domain/entities/User.js';
 
 // Schema de validação das variáveis de ambiente
 const envSchema = z.object({
@@ -22,7 +24,13 @@ const envSchema = z.object({
   EVOLUTION_API_KEY: z.string().optional().default(''),
   EVOLUTION_INSTANCE_NAME: z.string().default('homelab_family'),
   GEMINI_API_KEY: z.string().min(1, 'GEMINI_API_KEY é obrigatória para o assistente funcionar'),
-  ADMIN_PHONE_NUMBER: z.string().default('5561981306655'),
+  ADMIN_PHONE_NUMBER: z
+    .string()
+    .regex(/^\d{10,15}$/, 'ADMIN_PHONE_NUMBER deve conter apenas dígitos, com DDI e DDD (ex.: 5561999999999)'),
+  // Números extras autorizados, separados por vírgula. O admin é sempre autorizado.
+  ALLOWED_PHONE_NUMBERS: z.string().default(''),
+  // Segredo compartilhado com a Evolution API (header x-webhook-token).
+  WEBHOOK_TOKEN: z.string().min(16, 'WEBHOOK_TOKEN deve ter ao menos 16 caracteres (use: openssl rand -hex 32)'),
 });
 
 const env = envSchema.parse({
@@ -34,11 +42,19 @@ const env = envSchema.parse({
   EVOLUTION_API_KEY: process.env.EVOLUTION_API_KEY,
   EVOLUTION_INSTANCE_NAME: process.env.EVOLUTION_INSTANCE_NAME,
   GEMINI_API_KEY: process.env.GEMINI_API_KEY,
-  ADMIN_PHONE_NUMBER: process.env.ADMIN_PHONE_NUMBER || '5561981306655',
+  ADMIN_PHONE_NUMBER: process.env.ADMIN_PHONE_NUMBER,
+  ALLOWED_PHONE_NUMBERS: process.env.ALLOWED_PHONE_NUMBERS,
+  WEBHOOK_TOKEN: process.env.WEBHOOK_TOKEN,
 });
 
 const port = parseInt(env.PORT, 10);
 const redisPort = parseInt(env.REDIS_PORT, 10);
+const allowedPhoneNumbers = env.ALLOWED_PHONE_NUMBERS.split(',')
+  .map((n) => normalizePhoneNumber(n.trim()))
+  .filter((n) => n.length > 0);
+
+// Corpo máximo aceito no webhook (mensagens de texto são pequenas).
+const MAX_WEBHOOK_BODY_BYTES = 1024 * 1024;
 
 // 1. Configuração do PostgreSQL Pool
 const pool = new pg.Pool({
@@ -83,7 +99,8 @@ const processIncomingMessage = new ProcessIncomingMessage(
   printRepository,
   whatsAppClient,
   llmClient,
-  env.ADMIN_PHONE_NUMBER
+  env.ADMIN_PHONE_NUMBER,
+  allowedPhoneNumbers
 );
 
 // 6. Worker para consumo assíncrono das mensagens
@@ -135,22 +152,47 @@ const server = http.createServer(async (req, res) => {
 
   // Rota de Webhook da Evolution API
   if (method === 'POST' && url === '/webhook') {
-    let rawBody = '';
+    // Autentica ANTES de ler o corpo.
+    if (!isWebhookAuthorized(req.headers, env.WEBHOOK_TOKEN)) {
+      console.warn('[Webhook] 🚫 Requisição rejeitada: token ausente ou inválido.');
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Unauthorized' }));
+      req.resume();
+      return;
+    }
 
-    req.on('data', (chunk) => {
-      rawBody += chunk;
+    const chunks: Buffer[] = [];
+    let receivedBytes = 0;
+    let aborted = false;
+
+    req.on('data', (chunk: Buffer) => {
+      if (aborted) return;
+      receivedBytes += chunk.length;
+      if (receivedBytes > MAX_WEBHOOK_BODY_BYTES) {
+        aborted = true;
+        console.warn('[Webhook] Corpo acima do limite permitido. Conexão encerrada.');
+        res.writeHead(413, { 'Content-Type': 'application/json', Connection: 'close' });
+        res.end(JSON.stringify({ error: 'Payload Too Large' }), () => req.destroy());
+        return;
+      }
+      chunks.push(chunk);
     });
 
     req.on('end', async () => {
+      if (aborted) return;
       try {
-        const payload = JSON.parse(rawBody || '{}');
-        const eventType = payload.event || 'unknown';
+        const payload = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+        const eventType = String(payload.event ?? 'unknown');
         console.log(`[Webhook] Evento recebido da Evolution API: ${eventType}`);
 
         // Apenas enfileira eventos de mensagem nova
-        if (eventType === 'messages.upsert' || eventType === 'messages-upsert' || !payload.event) {
+        if (['messages.upsert', 'messages-upsert', 'MESSAGES_UPSERT'].includes(eventType)) {
+          // jobId derivado do id da mensagem: a Evolution pode reentregar o
+          // mesmo evento e o BullMQ descarta jobs com id repetido.
+          const messageId = payload?.data?.key?.id;
           await messageQueue.add('evolution-message', payload, {
-            removeOnComplete: true,
+            jobId: typeof messageId === 'string' && messageId ? `msg-${messageId}` : undefined,
+            removeOnComplete: { age: 3600 },
             removeOnFail: 100,
           });
         }
@@ -192,7 +234,7 @@ async function bootstrap() {
       console.log(`🚀 Servidor HTTP ouvindo na porta ${port}`);
       console.log(`🩺 Healthcheck: http://localhost:${port}/health`);
       console.log(`📡 Webhook URL para Evolution API: http://core-assistant:${port}/webhook`);
-      console.log(`👑 Administrador padrão: ${env.ADMIN_PHONE_NUMBER}`);
+      console.log(`👑 Administrador: ${maskPhone(env.ADMIN_PHONE_NUMBER)} | Autorizados extras: ${allowedPhoneNumbers.length}`);
       console.log('----------------------------------------------------');
       console.log('💬 Pronto para receber mensagens do WhatsApp!');
       console.log('----------------------------------------------------');

@@ -58,7 +58,13 @@ POSTGRES_DB=homelab_assistant
 EVOLUTION_API_KEY=sua_evolution_api_key_secreta
 GEMINI_API_KEY=sua_chave_do_google_gemini
 ADMIN_PHONE_NUMBER=5561999999999
+ALLOWED_PHONE_NUMBERS=5561888888888,5561777777777
+WEBHOOK_TOKEN=cole_aqui_a_saida_de_openssl_rand_hex_32
 ```
+
+- `ADMIN_PHONE_NUMBER` e `WEBHOOK_TOKEN` são **obrigatórios** (o app não sobe sem eles).
+- Apenas o admin e os números de `ALLOWED_PHONE_NUMBERS` são atendidos; qualquer outro remetente é ignorado.
+- As portas `3000` e `8080` são publicadas somente em `127.0.0.1`. Para acesso externo, use um reverse proxy com TLS.
 
 ### 3. Iniciar a Stack com Docker
 
@@ -101,6 +107,8 @@ http://localhost:8080/instance/connect/homelab_family
 
 ### 3. Configurar o Webhook
 
+O webhook exige o header `x-webhook-token` (mesmo valor de `WEBHOOK_TOKEN`); sem ele, o assistente responde `401`.
+
 Configure o webhook para encaminhar as mensagens recebidas ao container `core-assistant`:
 
 ```bash
@@ -111,6 +119,10 @@ curl -X POST http://localhost:8080/webhook/set/homelab_family \
     "webhook": {
       "enabled": true,
       "url": "http://core-assistant:3000/webhook",
+      "headers": {
+        "x-webhook-token": "SEU_WEBHOOK_TOKEN",
+        "Content-Type": "application/json"
+      },
       "byEvents": false,
       "base64": false,
       "events": [
