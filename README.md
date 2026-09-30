@@ -64,6 +64,7 @@ WEBHOOK_TOKEN=cole_aqui_a_saida_de_openssl_rand_hex_32
 ```
 
 - `GEMINI_MODEL` é opcional. Modelos antigos são desativados pela Google (o `gemini-2.5-flash` já não atende contas novas), então troque por aqui, sem mexer no código.
+- Erros transitórios do Gemini (503/429/500...) são repetidos até 3 vezes com espera crescente. Se `GEMINI_FALLBACK_MODEL` estiver definido, ele é usado quando o principal continua indisponível. Erros permanentes (chave inválida, modelo inexistente) não são repetidos.
 - `ADMIN_PHONE_NUMBER` e `WEBHOOK_TOKEN` são **obrigatórios** (o app não sobe sem eles).
 - Apenas o admin e os números de `ALLOWED_PHONE_NUMBERS` são atendidos; qualquer outro remetente é ignorado.
 - As portas `3000` e `8080` são publicadas somente em `127.0.0.1`. Para acesso externo, use um reverse proxy com TLS.

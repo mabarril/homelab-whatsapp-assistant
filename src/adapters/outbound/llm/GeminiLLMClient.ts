@@ -77,6 +77,32 @@ function sanitizeDisplayName(name: string): string {
   return cleaned || 'usuário';
 }
 
+// Falhas transitórias do provedor: vale tentar de novo. 400/401/403/404 (chave,
+// modelo inexistente, requisição inválida) não se resolvem sozinhas.
+const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
+const DEFAULT_RETRY_DELAYS_MS = [1000, 3000];
+
+function extractStatus(err: unknown): number | undefined {
+  const status = (err as any)?.status;
+  if (typeof status === 'number') return status;
+  const message = err instanceof Error ? err.message : String(err);
+  const match = message.match(/"code"\s*:\s*(\d{3})/);
+  return match ? Number(match[1]) : undefined;
+}
+
+/** Sem status conhecido (ex.: falha de rede) também conta como transitório. */
+function isRetryable(err: unknown): boolean {
+  const status = extractStatus(err);
+  return status === undefined || RETRYABLE_STATUS.has(status);
+}
+
+export interface GeminiClientOptions {
+  /** Modelo de contingência, usado se o principal continuar indisponível após as tentativas. */
+  fallbackModel?: string;
+  /** Esperas entre tentativas, em ms. O padrão é [1000, 3000] (3 tentativas no total). */
+  retryDelaysMs?: number[];
+}
+
 // Subconjunto do cliente do SDK que usamos (facilita injetar um dublê em testes).
 export interface GenAIClientLike {
   models: { generateContent(params: any): Promise<any> };
@@ -136,10 +162,19 @@ const TOOLS = [
 export class GeminiLLMClient implements LLMServicePort {
   private readonly ai: GenAIClientLike;
   private readonly modelName: string;
+  private readonly fallbackModel?: string;
+  private readonly retryDelaysMs: number[];
 
-  constructor(apiKey: string, modelName: string = 'gemini-3.8-flash', ai?: GenAIClientLike) {
+  constructor(
+    apiKey: string,
+    modelName: string = 'gemini-3.8-flash',
+    ai?: GenAIClientLike,
+    options: GeminiClientOptions = {}
+  ) {
     this.ai = ai ?? (new GoogleGenAI({ apiKey }) as unknown as GenAIClientLike);
     this.modelName = modelName;
+    this.fallbackModel = options.fallbackModel || undefined;
+    this.retryDelaysMs = options.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS;
   }
 
   async generateResponse(options: GenerateResponseOptions): Promise<string> {
@@ -174,7 +209,9 @@ Instruções para o WhatsApp:
     contents.push({ role: 'user', parts: [{ text: currentMessage }] });
 
     for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
-      const response = await this.callModel(contents, systemInstruction);
+      // O modelo de contingência só entra antes de qualquer ferramenta: as assinaturas
+      // de raciocínio de um turno com chamadas de função são específicas do modelo.
+      const response = await this.callModel(contents, systemInstruction, round === 0);
       const functionCalls: any[] = response.functionCalls ?? [];
 
       // Sem chamadas de ferramenta: é a resposta final em texto.
@@ -212,17 +249,46 @@ Instruções para o WhatsApp:
     );
   }
 
-  private async callModel(contents: any[], systemInstruction: string): Promise<any> {
-    try {
-      return await this.ai.models.generateContent({
-        model: this.modelName,
-        contents,
-        config: { systemInstruction, tools: TOOLS },
-      });
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      throw new LLMUnavailableError(`Erro ao chamar a API do Gemini: ${msg}`, { cause: err });
+  private async callModel(contents: any[], systemInstruction: string, allowFallback: boolean): Promise<any> {
+    let lastErr: unknown;
+    const attempts = this.retryDelaysMs.length + 1;
+
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      try {
+        return await this.request(this.modelName, contents, systemInstruction);
+      } catch (err: unknown) {
+        lastErr = err;
+        if (!isRetryable(err)) break;
+        if (attempt < attempts - 1) {
+          const base = this.retryDelaysMs[attempt];
+          const wait = base > 0 ? base + Math.floor(Math.random() * 250) : 0;
+          console.warn(
+            `[GeminiLLMClient] Falha transitória (status ${extractStatus(err) ?? 'rede'}) — nova tentativa ${attempt + 2}/${attempts} em ${wait}ms.`
+          );
+          if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+        }
+      }
     }
+
+    if (allowFallback && this.fallbackModel && this.fallbackModel !== this.modelName && isRetryable(lastErr)) {
+      console.warn(`[GeminiLLMClient] ${this.modelName} indisponível; usando o modelo de contingência ${this.fallbackModel}.`);
+      try {
+        return await this.request(this.fallbackModel, contents, systemInstruction);
+      } catch (err: unknown) {
+        lastErr = err;
+      }
+    }
+
+    const msg = lastErr instanceof Error ? lastErr.message : String(lastErr);
+    throw new LLMUnavailableError(`Erro ao chamar a API do Gemini: ${msg}`, { cause: lastErr });
+  }
+
+  private request(model: string, contents: any[], systemInstruction: string): Promise<any> {
+    return this.ai.models.generateContent({
+      model,
+      contents,
+      config: { systemInstruction, tools: TOOLS },
+    });
   }
 
   /**
