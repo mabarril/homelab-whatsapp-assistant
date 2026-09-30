@@ -208,10 +208,20 @@ Instruções para o WhatsApp:
     }));
     contents.push({ role: 'user', parts: [{ text: currentMessage }] });
 
+    // Modelo em uso neste atendimento. As assinaturas de raciocínio de um turno com
+    // chamadas de função são específicas do modelo que as gerou, então, depois da
+    // primeira resposta, todas as rodadas seguintes ficam nele. A contingência só
+    // pode entrar na primeira rodada, quando o histórico ainda não tem chamadas.
+    let activeModel = this.modelName;
+
     for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
-      // O modelo de contingência só entra antes de qualquer ferramenta: as assinaturas
-      // de raciocínio de um turno com chamadas de função são específicas do modelo.
-      const response = await this.callModel(contents, systemInstruction, round === 0);
+      const { response, model } = await this.callModel(
+        contents,
+        systemInstruction,
+        activeModel,
+        round === 0 && activeModel === this.modelName
+      );
+      activeModel = model;
       const functionCalls: any[] = response.functionCalls ?? [];
 
       // Sem chamadas de ferramenta: é a resposta final em texto.
@@ -249,13 +259,18 @@ Instruções para o WhatsApp:
     );
   }
 
-  private async callModel(contents: any[], systemInstruction: string, allowFallback: boolean): Promise<any> {
+  private async callModel(
+    contents: any[],
+    systemInstruction: string,
+    model: string,
+    allowFallback: boolean
+  ): Promise<{ response: any; model: string }> {
     let lastErr: unknown;
     const attempts = this.retryDelaysMs.length + 1;
 
     for (let attempt = 0; attempt < attempts; attempt++) {
       try {
-        return await this.request(this.modelName, contents, systemInstruction);
+        return { response: await this.request(model, contents, systemInstruction), model };
       } catch (err: unknown) {
         lastErr = err;
         if (!isRetryable(err)) break;
@@ -270,10 +285,13 @@ Instruções para o WhatsApp:
       }
     }
 
-    if (allowFallback && this.fallbackModel && this.fallbackModel !== this.modelName && isRetryable(lastErr)) {
-      console.warn(`[GeminiLLMClient] ${this.modelName} indisponível; usando o modelo de contingência ${this.fallbackModel}.`);
+    if (allowFallback && this.fallbackModel && this.fallbackModel !== model && isRetryable(lastErr)) {
+      console.warn(`[GeminiLLMClient] ${model} indisponível; usando o modelo de contingência ${this.fallbackModel}.`);
       try {
-        return await this.request(this.fallbackModel, contents, systemInstruction);
+        return {
+          response: await this.request(this.fallbackModel, contents, systemInstruction),
+          model: this.fallbackModel,
+        };
       } catch (err: unknown) {
         lastErr = err;
       }

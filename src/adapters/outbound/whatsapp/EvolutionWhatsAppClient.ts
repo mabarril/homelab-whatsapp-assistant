@@ -5,6 +5,10 @@ export interface EvolutionClientConfig {
   baseUrl: string;
   apiKey: string;
   instanceName: string;
+  /** Tempo máximo de cada requisição, em ms (padrão 15000). */
+  requestTimeoutMs?: number;
+  /** Esperas entre novas tentativas em falha de rede, em ms (padrão [500, 1500]). */
+  retryDelaysMs?: number[];
 }
 
 interface SendAttempt {
@@ -15,15 +19,47 @@ interface SendAttempt {
   numberNotFound: boolean;
 }
 
+// Falhas em que a conexão caiu ou nem chegou a ser feita: vale repetir.
+// Timeout NÃO entra: a Evolution pode ter aceitado a mensagem e repetir duplicaria o envio.
+const RETRYABLE_NETWORK_CODES = new Set([
+  'ECONNREFUSED',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'ECONNRESET',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_SOCKET',
+]);
+
+/** O `fetch` do Node esconde a causa real em `err.cause` (ou em um AggregateError). */
+function networkErrorCode(err: unknown): string | undefined {
+  const e = err as any;
+  return e?.cause?.code ?? e?.cause?.errors?.[0]?.code ?? e?.code;
+}
+
+function describeNetworkError(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  const code = networkErrorCode(err);
+  return code ? `${message} [${code}]` : message;
+}
+
+function isRetryableNetworkError(err: unknown): boolean {
+  const code = networkErrorCode(err);
+  return code !== undefined && RETRYABLE_NETWORK_CODES.has(code);
+}
+
 export class EvolutionWhatsAppClient implements WhatsAppNotifierPort {
   private readonly baseUrl: string;
   private readonly apiKey: string;
   private readonly instanceName: string;
+  private readonly requestTimeoutMs: number;
+  private readonly retryDelaysMs: number[];
 
   constructor(config: EvolutionClientConfig) {
     this.baseUrl = config.baseUrl.replace(/\/$/, '');
     this.apiKey = config.apiKey;
     this.instanceName = config.instanceName;
+    this.requestTimeoutMs = config.requestTimeoutMs ?? 15_000;
+    this.retryDelaysMs = config.retryDelaysMs ?? [500, 1500];
   }
 
   async sendTextMessage(to: string, text: string): Promise<boolean> {
@@ -53,23 +89,48 @@ export class EvolutionWhatsAppClient implements WhatsAppNotifierPort {
       console.log(`[EvolutionClient] ✅ Mensagem enviada com sucesso para ${label}`);
       return true;
     } catch (err: unknown) {
-      const errorMsg = err instanceof Error ? err.message : String(err);
-      console.error(`[EvolutionClient] Falha de rede ao enviar mensagem para ${label}:`, errorMsg);
+      console.error(`[EvolutionClient] Falha de rede ao enviar mensagem para ${label}: ${describeNetworkError(err)}`);
       return false;
     }
   }
 
   private async post(number: string, text: string): Promise<SendAttempt> {
-    const response = await fetch(`${this.baseUrl}/message/sendText/${this.instanceName}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', apikey: this.apiKey },
-      body: JSON.stringify({ number, text }),
-    });
+    const response = await this.fetchWithRetry(number, text);
 
     if (response.ok) return { ok: true, status: response.status, body: '', numberNotFound: false };
 
     const body = await response.text();
-    return { ok: false, status: response.status, body, numberNotFound: response.status === 400 && this.isNumberNotFound(body) };
+    return {
+      ok: false,
+      status: response.status,
+      body,
+      numberNotFound: response.status === 400 && this.isNumberNotFound(body),
+    };
+  }
+
+  private async fetchWithRetry(number: string, text: string): Promise<Response> {
+    const attempts = this.retryDelaysMs.length + 1;
+    let lastErr: unknown;
+
+    for (let i = 0; i < attempts; i++) {
+      try {
+        return await fetch(`${this.baseUrl}/message/sendText/${this.instanceName}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', apikey: this.apiKey },
+          body: JSON.stringify({ number, text }),
+          signal: AbortSignal.timeout(this.requestTimeoutMs),
+        });
+      } catch (err: unknown) {
+        lastErr = err;
+        if (!isRetryableNetworkError(err) || i === attempts - 1) break;
+        const wait = this.retryDelaysMs[i];
+        console.warn(
+          `[EvolutionClient] Falha de rede (${describeNetworkError(err)}); nova tentativa ${i + 2}/${attempts} em ${wait}ms.`
+        );
+        if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+      }
+    }
+    throw lastErr;
   }
 
   private isNumberNotFound(body: string): boolean {

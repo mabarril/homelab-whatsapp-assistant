@@ -152,6 +152,11 @@ export class ProcessIncomingMessage {
     await this.messageRepository.saveMessage(conversationId, 'model', replyText);
 
     // 10. Envia a resposta de volta pelo WhatsApp
-    await this.whatsAppNotifier.sendTextMessage(remoteJid, replyText);
+    const delivered = await this.whatsAppNotifier.sendTextMessage(remoteJid, replyText);
+    if (!delivered) {
+      // Sem retry do job de propósito: repetir rodaria o LLM e as ferramentas de novo
+      // (duplicando cálculos salvos). A resposta já está no histórico.
+      console.error(`[ProcessIncomingMessage] ⚠️ Resposta gerada, mas NÃO entregue ao WhatsApp (${maskPhone(phoneNumber)}).`);
+    }
   }
 }
